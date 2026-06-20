@@ -13,6 +13,9 @@ import {
 import {
   doc, getDoc, setDoc,
 } from "firebase/firestore";
+import {
+  cl, ef, ep, ini, pInc, pExp, pDC, pGA, jTot, pBal,
+} from "./src/utils/calculations.js";
 
 // ──────────────────────────────────────────────────────
 // CONSTANTS
@@ -25,10 +28,6 @@ const DICONS=["💳","🏦","📋","💼","🧾","💵","📌","⚠"];
 const LICONS=["🏡","🌍","🏠","🏗","🗺","📍","🏞","🌿"];
 const ICOLORS=["#f04060","#f5a020","#00e6a8","#5b9cf6","#b49dfa","#f87171","#34d399","#fb923c"];
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-const ini=n=>(n||"?").trim().split(/\s+/).slice(0,2).map(w=>w[0]?.toUpperCase()||"").join("")||"?";
-const ef=n=>"€"+Math.round(n||0).toLocaleString("es-ES");
-const ep=n=>Math.round(n||0)+"%";
-const cl=(v,a,b)=>Math.min(Math.max(v,a),b);
 const NOW=new Date();
 const EMPTY={year:NOW.getFullYear(),month:NOW.getMonth(),
   persons:[{id:"p0",name:"Persona 1",ci:0,mode:"mensual",sal:0,extra:0,rate:80,days:22,extraD:0,exp:{movil:0,ocio:0,ropa:0,otros:0}},
@@ -37,16 +36,8 @@ const EMPTY={year:NOW.getFullYear(),month:NOW.getMonth(),
   debts:[],lands:[],goals:[],history:[]};
 
 // ──────────────────────────────────────────────────────
-// CALCULATIONS
+// PRESENTATION HELPERS
 // ──────────────────────────────────────────────────────
-const pInc=p=>p.mode==="diario"?(p.rate||0)*(p.days||0)+(p.extraD||0):(p.sal||0)+(p.extra||0);
-const pExp=p=>Object.values(p.exp||{}).reduce((a,b)=>a+b,0);
-const pDC=(d,pid)=>d.filter(x=>x.owner===pid).reduce((a,x)=>a+(x.cuo||0),0);
-const pGA=(g,pid)=>g.filter(x=>x.owner===pid).reduce((a,x)=>a+(x.apo||0),0);
-function jTot(S){const jf=Object.values(S.joint.fixed).reduce((a,b)=>a+b,0),jv=Object.values(S.joint.variable).reduce((a,b)=>a+b,0),
-  jdc=S.debts.filter(d=>d.owner==="joint").reduce((a,d)=>a+(d.cuo||0),0),jlc=S.lands.filter(l=>l.owner==="joint").reduce((a,l)=>a+(l.cuo||0),0),
-  jgc=S.goals.filter(g=>g.owner==="joint").reduce((a,g)=>a+(g.apo||0),0);return{jf,jv,jdc,jlc,jgc,total:jf+jv+jdc+jlc+jgc};}
-function pBal(S,i){const p=S.persons[i],inc=pInc(p),exp=pExp(p),dc=pDC(S.debts,p.id),gc=pGA(S.goals,p.id);return{inc,exp,dc,gc,net:inc-exp-dc-gc};}
 function oInf(S,o){if(o==="joint")return{text:"Conjunto",color:"#5b9cf6",bg:"rgba(91,156,246,.10)",bd:"rgba(91,156,246,.25)"};
   const p=S.persons.find(x=>x.id===o);if(!p)return{text:"—",color:"#3d4f6a",bg:"rgba(255,255,255,.05)",bd:"rgba(255,255,255,.08)"};
   const c=C[p.ci];return{text:p.name.split(" ")[0],color:c.main,bg:c.d,bd:c.m};}
