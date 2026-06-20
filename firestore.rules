@@ -1,0 +1,77 @@
+rules_version = '2';
+
+// Reglas de seguridad de Firestore — "My Little Counter" (finanzas en pareja).
+//
+// Modelo de datos:
+//   users/{uid}        -> { email, displayName, partnerId, appData }   (finanzas privadas)
+//   emailIndex/{email} -> { uid, displayName }                          (directorio público mínimo)
+//   households/{sk}    -> { appData }   con sk = sort(uidA, uidB).join("_")  (datos de la pareja)
+//
+// Principio: denegar por defecto; conceder lo mínimo que la app necesita.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Email del token (los proveedores email/password siempre lo incluyen), en minúsculas.
+    function authEmail() {
+      return isSignedIn() && request.auth.token.email != null
+        ? request.auth.token.email.lower()
+        : "";
+    }
+
+    // users/{uid}: doc privado con las finanzas. NUNCA se concede 'list'.
+    match /users/{userId} {
+      // Solo el dueño lee su propio doc.
+      allow get: if isSignedIn() && request.auth.uid == userId;
+
+      // Solo el dueño crea su doc.
+      allow create: if isSignedIn() && request.auth.uid == userId;
+
+      // El dueño actualiza todo. Otro usuario SOLO puede fijar partnerId con su propio uid,
+      // y únicamente si la otra persona aún no tiene pareja (evita "robar" una vinculación
+      // existente). Esto habilita el flujo de vincular sin abrir el resto del documento.
+      allow update: if isSignedIn() && (
+        request.auth.uid == userId
+        || (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['partnerId'])
+          && request.resource.data.partnerId == request.auth.uid
+          && (!('partnerId' in resource.data) || resource.data.partnerId == null)
+        )
+      );
+
+      // Sin borrado desde el cliente.
+      allow delete: if false;
+    }
+
+    // emailIndex/{email}: directorio mínimo email -> { uid, displayName }.
+    // No contiene datos financieros. Permite resolver el email de la pareja sin listar "users".
+    match /emailIndex/{email} {
+      // Lectura puntual por cualquier usuario autenticado; 'list' nunca se concede.
+      allow get: if isSignedIn();
+      allow list: if false;
+
+      // Solo puedes registrar/actualizar TU propio email (el del token) apuntando a TU uid.
+      allow create, update: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid
+        && email == authEmail();
+
+      allow delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    // households/{sk}: doc compartido de la pareja. El acceso se deriva del propio ID:
+    // debes ser uno de los dos uids embebidos en sk = sort(uidA, uidB).join("_").
+    // Seguro porque los uids de Firebase Auth son alfanuméricos (no contienen "_").
+    match /households/{sk} {
+      allow read, write: if isSignedIn() && request.auth.uid in sk.split('_');
+    }
+
+    // Todo lo demás: denegado.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
