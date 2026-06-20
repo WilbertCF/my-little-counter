@@ -2,6 +2,17 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from "recharts";
 import { Home, Users, Clock, ChevronLeft, ChevronRight, Plus, X, LogOut, Link2, Eye, EyeOff, Check, AlertTriangle, User, Mail, Lock, Zap, Shield, Heart } from "lucide-react";
 import logoSrc from "./logo.jpeg";
+import { auth, db } from "./src/firebase.js";
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  updateProfile,
+} from "firebase/auth";
+import {
+  doc, getDoc, setDoc, collection, query, where, getDocs,
+} from "firebase/firestore";
 
 // ──────────────────────────────────────────────────────
 // CONSTANTS
@@ -41,19 +52,21 @@ function oInf(S,o){if(o==="joint")return{text:"Conjunto",color:"#5b9cf6",bg:"rgb
   const c=C[p.ci];return{text:p.name.split(" ")[0],color:c.main,bg:c.d,bd:c.m};}
 
 // ──────────────────────────────────────────────────────
-// STORAGE — robust with fallback + error reporting
+// STORAGE — localStorage (guest) + Firestore (users)
 // ──────────────────────────────────────────────────────
-async function sGet(k, sh = false) {
-  try { const r = await window.storage.get(k, sh); if (r && r.value) return JSON.parse(r.value); return null; }
-  catch (e) { return null; }
-}
-async function sSet(k, v, sh = false) {
-  try { await window.storage.set(k, JSON.stringify(v), sh); return true; }
-  catch (e) { console.error("sSet fail:", k, e); return false; }
-}
-async function sDel(k, sh = false) {
-  try { await window.storage.delete(k, sh); return true; } catch (e) { return false; }
-}
+const lsGet = k => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
+const lsDel = k => { try { localStorage.removeItem(k); return true; } catch { return false; } };
+
+const fsGet = async uid => { try { const s = await getDoc(doc(db, "users", uid)); return s.exists() ? s.data() : null; } catch { return null; } };
+const fsSet = async (uid, data) => { try { await setDoc(doc(db, "users", uid), data, { merge: true }); return true; } catch { return false; } };
+const fsHouseGet = async sk => { try { const s = await getDoc(doc(db, "households", sk)); return s.exists() ? s.data() : null; } catch { return null; } };
+const fsHouseSet = async (sk, data) => { try { await setDoc(doc(db, "households", sk), data, { merge: true }); return true; } catch { return false; } };
+
+const buildProfile = async fbUser => {
+  const data = await fsGet(fbUser.uid) || {};
+  return { uid: fbUser.uid, email: fbUser.email, name: fbUser.displayName || data.displayName || "Usuario", partnerId: data.partnerId || null };
+};
 
 // ──────────────────────────────────────────────────────
 // GLOBAL STYLES
@@ -386,26 +399,26 @@ function Login({onLogin, onGuest}) {
     setErr("");
     if (!email.trim() || !pass.trim()) { setErr("Completa todos los campos"); return; }
     if (!/\S+@\S+\.\S+/.test(email)) { setErr("Email no válido"); return; }
-    if (pass.length < 4) { setErr("Mínimo 4 caracteres"); return; }
+    if (pass.length < 6) { setErr("Mínimo 6 caracteres"); return; }
     if (mode === "register" && !name.trim()) { setErr("Ingresa tu nombre"); return; }
     setLd(true);
-    const k = "user:" + email.toLowerCase().trim();
     try {
       if (mode === "register") {
-        const ex = await sGet(k);
-        if (ex) { setErr("Email ya registrado"); setLd(false); return; }
-        const u = {email: email.toLowerCase().trim(), name: name.trim(), pass, createdAt: Date.now(), partnerId: null};
-        const ok = await sSet(k, u);
-        if (!ok) { setErr("Error al guardar. Intenta de nuevo."); setLd(false); return; }
-        onLogin(u);
+        const cred = await createUserWithEmailAndPassword(auth, email.trim(), pass);
+        await updateProfile(cred.user, { displayName: name.trim() });
+        await fsSet(cred.user.uid, { email: email.toLowerCase().trim(), displayName: name.trim(), partnerId: null });
+        // onLogin will be called via onAuthStateChanged in App
       } else {
-        const u = await sGet(k);
-        if (!u) { setErr("No existe cuenta con ese email"); setLd(false); return; }
-        if (u.pass !== pass) { setErr("Contraseña incorrecta"); setLd(false); return; }
-        onLogin(u);
+        await signInWithEmailAndPassword(auth, email.trim(), pass);
+        // onLogin will be called via onAuthStateChanged in App
       }
-    } catch (e) { setErr("Error de conexión"); }
-    setLd(false);
+    } catch (e) {
+      const m = { "auth/user-not-found": "No existe cuenta con ese email", "auth/wrong-password": "Contraseña incorrecta",
+        "auth/email-already-in-use": "Email ya registrado", "auth/invalid-email": "Email no válido",
+        "auth/invalid-credential": "Email o contraseña incorrectos" };
+      setErr(m[e.code] || "Error de conexión");
+      setLd(false);
+    }
   };
 
   return (
@@ -475,18 +488,47 @@ function Login({onLogin, onGuest}) {
 // ──────────────────────────────────────────────────────
 // PARTNER LINK
 // ──────────────────────────────────────────────────────
-function PLink({user, S, upS, toast}) {
+function PLink({user, S, upS, toast, onPartnerLinked}) {
   const [pe, setPe] = useState(""); const [st, setSt] = useState(null); const [pn, setPn] = useState(""); const [sy, setSy] = useState(false);
-  useEffect(() => { if (user?.partnerId) (async () => { const p = await sGet("user:" + user.partnerId); if (p) { setPn(p.name); setSt("linked"); } })(); }, [user?.partnerId]);
+  useEffect(() => {
+    if (user?.partnerId) {
+      (async () => {
+        const d = await fsGet(user.partnerId);
+        if (d) { setPn(d.displayName || "Pareja"); setSt("linked"); }
+      })();
+    }
+  }, [user?.partnerId]);
   if (!user) return null;
-  const link = async () => { if (!pe.trim() || !/\S+@\S+\.\S+/.test(pe)) { toast("Email no válido"); return; } const e = pe.toLowerCase().trim();
-    if (e === user.email) { toast("No puedes vincularte contigo"); return; } const p = await sGet("user:" + e);
-    if (!p) { toast("No existe esa cuenta"); setSt("error"); return; } p.partnerId = user.email; user.partnerId = e;
-    await sSet("user:" + e, p); await sSet("user:" + user.email, user);
-    const sk = "household:" + [user.email, e].sort().join(":"); await sSet(sk, S); setPn(p.name); setSt("linked"); toast("✓ Vinculado con " + p.name); };
-  const sync = async () => { if (!user.partnerId) return; setSy(true); const sk = "household:" + [user.email, user.partnerId].sort().join(":");
-    const d = await sGet(sk); if (d) { upS(d); toast("✓ Sincronizado"); } else { await sSet(sk, S); toast("✓ Datos enviados"); } setSy(false); };
-  const push = async () => { if (!user.partnerId) return; const sk = "household:" + [user.email, user.partnerId].sort().join(":"); await sSet(sk, S); toast("✓ Enviado"); };
+  const houseKey = partnerId => [user.uid, partnerId].sort().join("_");
+  const link = async () => {
+    if (!pe.trim() || !/\S+@\S+\.\S+/.test(pe)) { toast("Email no válido"); return; }
+    const e = pe.toLowerCase().trim();
+    if (e === user.email) { toast("No puedes vincularte contigo"); return; }
+    const q2 = query(collection(db, "users"), where("email", "==", e));
+    const snap = await getDocs(q2);
+    if (snap.empty) { toast("No existe esa cuenta"); setSt("error"); return; }
+    const partnerDoc = snap.docs[0]; const partnerId = partnerDoc.id; const partnerData = partnerDoc.data();
+    await fsSet(user.uid, { partnerId });
+    await fsSet(partnerId, { partnerId: user.uid });
+    const sk = houseKey(partnerId);
+    await fsHouseSet(sk, { appData: S });
+    setPn(partnerData.displayName || "Pareja"); setSt("linked");
+    onPartnerLinked && onPartnerLinked(partnerId);
+    toast("✓ Vinculado con " + (partnerData.displayName || "Pareja"));
+  };
+  const sync = async () => {
+    if (!user.partnerId) return; setSy(true);
+    const sk = houseKey(user.partnerId);
+    const d = await fsHouseGet(sk);
+    if (d && d.appData) { upS(d.appData); toast("✓ Sincronizado"); }
+    else { await fsHouseSet(sk, { appData: S }); toast("✓ Datos enviados"); }
+    setSy(false);
+  };
+  const push = async () => {
+    if (!user.partnerId) return;
+    const sk = houseKey(user.partnerId);
+    await fsHouseSet(sk, { appData: S }); toast("✓ Enviado");
+  };
   return (<div className="LNK"><div className="LNKT"><Link2 size={13} /> Vincular pareja</div>
     {st === "linked" ? (<><div className="LNKST LSok"><Check size={11} /> Vinculado con <strong style={{marginLeft: 3}}>{pn}</strong></div>
       <div style={{display: "flex", gap: 5, marginTop: 8}}><button className="BA" style={{background: "rgba(0,230,168,.06)", color: "#00e6a8", border: "1px solid rgba(0,230,168,.1)", flex: 1}}
@@ -661,16 +703,20 @@ export default function App() {
   const setTheme = i => { setAccentIdx(i); try { localStorage.setItem("accentIdx", i); } catch {} };
   const tR = useRef(null);
 
-  // Check saved session
+  // Firebase auth listener — replaces session check
   useEffect(() => {
-    (async () => {
-      const s = await sGet("session");
-      if (s && s.email) {
-        if (s.email === "__guest__") { setUser("guest"); }
-        else { const u = await sGet("user:" + s.email); if (u) setUser(u); }
+    const unsub = onAuthStateChanged(auth, async fbUser => {
+      if (fbUser) {
+        const profile = await buildProfile(fbUser);
+        setUser(profile);
+      } else {
+        // Check guest mode in localStorage
+        if (lsGet("guestMode")) { setUser("guest"); }
+        else { setUser(null); }
       }
       setAuthLd(false);
-    })();
+    });
+    return unsub;
   }, []);
 
   // Load data after auth
@@ -678,17 +724,17 @@ export default function App() {
     if (!user) return;
     (async () => {
       if (user === "guest") {
-        const d = await sGet("data:guest");
+        const d = lsGet("data:guest");
         if (d) setS(prev => ({...prev, ...d}));
       } else if (user.partnerId) {
-        const sk = "household:" + [user.email, user.partnerId].sort().join(":");
-        const d = await sGet(sk);
-        if (d) { setS(prev => ({...prev, ...d})); setLoaded(true); return; }
-        const d2 = await sGet("data:" + user.email);
-        if (d2) setS(prev => ({...prev, ...d2}));
+        const sk = [user.uid, user.partnerId].sort().join("_");
+        const hd = await fsHouseGet(sk);
+        if (hd && hd.appData) { setS(prev => ({...prev, ...hd.appData})); setLoaded(true); return; }
+        const ud = await fsGet(user.uid);
+        if (ud && ud.appData) setS(prev => ({...prev, ...ud.appData}));
       } else {
-        const d = await sGet("data:" + (user.email || "guest"));
-        if (d) setS(prev => ({...prev, ...d}));
+        const ud = await fsGet(user.uid);
+        if (ud && ud.appData) setS(prev => ({...prev, ...ud.appData}));
       }
       setLoaded(true);
     })();
@@ -698,11 +744,14 @@ export default function App() {
   useEffect(() => {
     if (!loaded || !user) return;
     const t = setTimeout(async () => {
-      const key = user === "guest" ? "data:guest" : "data:" + user.email;
-      await sSet(key, S);
-      if (user !== "guest" && user.partnerId) {
-        const sk = "household:" + [user.email, user.partnerId].sort().join(":");
-        await sSet(sk, S);
+      if (user === "guest") {
+        lsSet("data:guest", S);
+      } else {
+        await fsSet(user.uid, { appData: S });
+        if (user.partnerId) {
+          const sk = [user.uid, user.partnerId].sort().join("_");
+          await fsHouseSet(sk, { appData: S });
+        }
       }
     }, 600);
     return () => clearTimeout(t);
@@ -724,9 +773,14 @@ export default function App() {
     setShowSave(false); toast("✓ " + snap.label + " guardado");
   };
 
-  const handleLogin = async (u) => { setUser(u); await sSet("session", {email: u.email}); };
-  const handleGuest = async () => { setUser("guest"); await sSet("session", {email: "__guest__"}); };
-  const handleLogout = async () => { await sDel("session"); setUser(null); setS(EMPTY); setLoaded(false); setTab(0); };
+  const handleLogin = () => {}; // handled by onAuthStateChanged
+  const handleGuest = () => { lsSet("guestMode", true); setUser("guest"); };
+  const handleLogout = async () => {
+    if (user === "guest") { lsDel("guestMode"); lsDel("data:guest"); }
+    else { await signOut(auth); }
+    setUser(null); setS(EMPTY); setLoaded(false); setTab(0);
+  };
+  const handlePartnerLinked = partnerId => setUser(prev => prev && prev !== "guest" ? {...prev, partnerId} : prev);
 
   // Loading
   if (authLd) return (<div className="A"><style>{CSS}</style><div style={{display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", color: "var(--t3)", fontFamily: "var(--ui)"}}>
@@ -783,7 +837,7 @@ export default function App() {
             onClick={() => setShowSave(true)}>Guardar →</button></div></header>
 
       {/* Partner link — only for logged in users */}
-      {tab === 0 && user !== "guest" && <div style={{marginTop: 8}}><PLink user={user} S={S} upS={upS} toast={toast} /></div>}
+      {tab === 0 && user !== "guest" && <div style={{marginTop: 8}}><PLink user={user} S={S} upS={upS} toast={toast} onPartnerLinked={handlePartnerLinked} /></div>}
 
       {/* Tabs */}
       {tab === 0 && <DashT S={S} />}

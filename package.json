@@ -1,5 +1,6 @@
 {
-  "name": "homepage": "https://WilbertCF.github.io/my-little-counter",
+  "name": "finanzas-app",
+  "homepage": "https://WilbertCF.github.io/my-little-counter",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
@@ -20,6 +21,7 @@
     "vitest": "^2.0.0"
   },
   "dependencies": {
+    "firebase": "^12.11.0",
     "lucide-react": "^1.7.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
